@@ -1,0 +1,1126 @@
+%YAML 1.2
+---
+# Sublime Text syntax definition for P4_16
+
+name: P4
+scope: source.p4
+file_extensions:
+  - p4
+
+variables:
+  # Identifiers - simplified for regex. Contexts will differentiate types/functions/variables.
+  identifier: "[a-zA-Z_][a-zA-Z0-9_]*"
+  # P4 allows type identifiers to start with uppercase, often used by convention
+  type_identifier: "[A-Z][a-zA-Z0-9_]*"
+  # Allow either for flexibility where grammar uses 'name' or 'nonTypeName' etc.
+  any_identifier: "{{identifier}}|{{type_identifier}}"
+  # Keywords for known, assignable table properties
+  table_property_keywords: "size|default_action"
+  # Base types fragment for easy reuse
+  base_types: "bool|string|error|match_kind|void|bit|int|varbit"
+  # Assignment operators fragment for lvalue checks
+  lvalue_operators: '\*=|/=|%=|\+=|-=|<<=|>>=|&=|\^=|\|=|\| \+ \| =| \| \- \| =|='
+  # Integer fragment for reuse
+  integer: "[0-9]+[sw]?"
+  # Keywords that start declarations (used for negative lookahead in var decl)
+  declaration_keywords: "const|extern|typedef|type|struct|header|header_union|enum|error|match_kind|parser|control|action|table|package|valueset"
+
+
+
+contexts:
+  main:
+    - include: comments
+    - include: preprocessor
+    - include: keywords
+    - include: annotations
+    - include: strings
+    - include: numbers
+    - include: operators # Needs to be before potential identifiers starting with keywords
+    - include: punctuation
+    - include: constants
+    - include: declarations
+    - include: identifiers # General identifier matching as fallback
+
+  # Core Constructs ========================================
+
+  declarations:
+    # Control Declaration
+    - match: '(?i)\b(control)\b\s+({{any_identifier}})'
+      captures:
+        1: storage.type.control.p4
+        2: entity.name.type.control.p4
+      push: control-declaration-body
+    # Parser Declaration
+    - match: '(?i)\b(parser)\b\s+({{any_identifier}})'
+      captures:
+        1: storage.type.parser.p4
+        2: entity.name.type.parser.p4
+      push: parser-declaration-body
+    # Action Declaration
+    - match: '(?i)\b(action)\b\s+({{any_identifier}})'
+      captures:
+        1: storage.type.action.p4
+        2: entity.name.function.action.p4
+      push: function-parameters # Actions have parameters and a body
+    # Table Declaration
+    - match: '(?i)\b(table)\b\s+({{any_identifier}})'
+      captures:
+        1: storage.type.table.p4
+        2: entity.name.type.table.p4
+      push: table-declaration-body
+    # Extern Declaration
+    - match: '(?i)\b(extern)\b\s+({{any_identifier}})'
+      captures:
+        1: storage.modifier.extern.p4
+        2: entity.name.type.extern.p4 # Extern object name
+      push:
+        - meta_scope: meta.extern.declaration.p4
+        - match: "{"
+          scope: punctuation.section.block.begin.bracket.curly.p4
+          push: extern-body
+        - match: ";" # Extern function prototype shorthand
+          scope: punctuation.terminator.semicolon.p4
+          pop: true
+        - include: function-signature # For extern function prototype
+    # Function Declaration (non-action, non-extern method)
+    - match: '(?=\b(?:{{identifier}}|{{type_identifier}}|void|{{base_types}})\b\s+(?:{{any_identifier}})\s*<*.*>\s*\()' # Lookahead for function signature
+      push: function-declaration
+    # Instantiation (Type(...) name;) or (Type(...) name = {...};)
+    - match: '^\s*(?:({{type_identifier}})|({{identifier}}))\s*\(' # Starts with Type(...) or identifier(...) - potential instantiation or call
+      scope: meta.instantiation.p4
+      push:
+        - match: '\)\s*({{any_identifier}})\s*(=)?\s*;'
+          captures:
+            1: variable.other.instance.p4
+            2: keyword.operator.assignment.p4
+          pop: true
+        - match: '\)\s*({{any_identifier}})\s*(=)\s*(\{)' # Instantiation with initializer
+          captures:
+            1: variable.other.instance.p4
+            2: keyword.operator.assignment.p4
+            3: punctuation.section.block.begin.bracket.curly.p4
+          set:
+            - meta_scope: meta.object.initializer.p4
+            - match: "}"
+              scope: punctuation.section.block.end.bracket.curly.p4
+              pop: true
+            - include: block # Contents of initializer block
+        - include: argument-list # Arguments for instantiation
+    # Type Definitions (struct, header, header_union, enum, typedef, type)
+    - include: type-declarations
+    # Constant Declaration
+    - match: '^\s*(?i)\b(const)\b'
+      scope: storage.modifier.const.p4
+      push:
+        - meta_scope: meta.constant.declaration.p4
+        - match: ";"
+          scope: punctuation.terminator.semicolon.p4
+          pop: true
+        - match: '(?i)\b({{any_identifier}})\b' # Constant name
+          scope: entity.name.constant.p4
+        - match: "="
+          scope: keyword.operator.assignment.p4
+          push: expression-context # Initializer expression
+        - include: type-ref # Type reference
+        - include: main # Fallback for other elements
+    # Variable Declaration (must be after const to avoid conflict)
+    - match: '^\s*(?:{{base_types}}|{{any_identifier}})(?:<.*>)?(?:\[.*\])?\s+(?!{{declaration_keywords}}\b)({{identifier}})\s*([=;])' # Basic check: Type Name ; or Type Name =
+      captures:
+        1: variable.other.p4 # Variable name
+        2: keyword.operator.assignment.p4 # Optional equals
+      push:
+        - meta_scope: meta.variable.declaration.p4
+        - match: ";"
+          scope: punctuation.terminator.semicolon.p4
+          pop: true
+        - match: "="
+          scope: keyword.operator.assignment.p4
+          set: expression-context # Initializer expression
+        - include: main # Fallback for other elements
+
+  # Blocks and Scopes ========================================
+
+  block:
+    - meta_scope: meta.block.p4
+    - match: "{"
+      scope: punctuation.section.block.begin.bracket.curly.p4
+      push: block
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+      pop: true
+    - include: statements
+    - include: main # Allow declarations inside blocks too
+
+  statements:
+    - include: control-flow
+    - include: comments
+    - include: annotations
+    # Assignment or Method Call
+    - match: '(?=.*\()' # Lookahead for parentheses suggests method call
+      push: method-call-or-assignment
+    - match: "(?=.*=)" # Lookahead for equals suggests assignment
+      push: method-call-or-assignment
+    # Empty statement
+    - match: ";"
+      scope: punctuation.terminator.semicolon.p4
+    # Other declarations allowed within blocks
+    - include: declarations
+    # Switch statement - ** Uses Corrected Logic **
+    - match: '(?i)\b(switch)\b\s*(\()'
+      captures:
+        1: keyword.control.switch.p4
+        2: punctuation.section.expression.begin.bracket.round.p4
+      push: switch-condition-context # Push context for the (...) part
+
+  method-call-or-assignment:
+    - meta_scope: meta.statement.assignment-or-call.p4
+    - match: ";"
+      scope: punctuation.terminator.semicolon.p4
+      pop: true
+    - match: '\('
+      scope: punctuation.section.arguments.begin.bracket.round.p4
+      push: argument-list
+    - match: "<" # Type arguments for method call
+      scope: punctuation.section.typeargs.begin.bracket.angle.p4
+      push: type-argument-list
+    - match: "{{lvalue_operators}}"
+      scope: keyword.operator.assignment.p4
+      push: expression-context # RHS of assignment
+    - match: '\.'
+      scope: punctuation.accessor.dot.p4
+    - match: '\[' # Array/slice access
+      scope: punctuation.section.array.begin.bracket.square.p4
+      push:
+        - meta_scope: meta.array.access.p4
+        - match: "]"
+          scope: punctuation.section.array.end.bracket.square.p4
+          pop: true
+        - match: ":"
+          scope: keyword.operator.slice.p4
+        - include: expression-context
+    - match: '(?i)\b(this)\b'
+      scope: variable.language.this.p4
+    - match: "({{any_identifier}})" # lvalue part or method name
+      scope: variable.other.p4 # Default, could be function too
+    - include: main # Fallback
+
+  expression-context:
+    - meta_scope: meta.expression.p4
+    - match: ";"
+      scope: punctuation.terminator.semicolon.p4
+      pop: true
+    - match: "[,)]" # End expression context on comma (in list) or closing paren
+      scope: punctuation.separator.comma.p4
+      pop: true
+    - match: '(?=[;:\]\)\}>])' # Lookahead for terminators/closers without consuming
+      pop: true
+    - include: main # Include general tokens within expressions
+
+  # Control Flow ============================================
+
+  control-flow:
+    # If statement
+    - match: '(?i)\b(if)\b\s*(\()'
+      captures:
+        1: keyword.control.conditional.if.p4
+        2: punctuation.section.condition.begin.bracket.round.p4
+      push:
+        - meta_scope: meta.conditional.if.p4
+        - match: '\)'
+          scope: punctuation.section.condition.end.bracket.round.p4
+          set: # After condition, expect a statement or block
+            - match: '(?i)\b(else)\b'
+              scope: keyword.control.conditional.else.p4
+              set: # After else, expect a statement or block
+                - include: statement-or-block # Expect the 'else' block/statement
+            - include: statement-or-block # Expect the 'if' block/statement
+        - include: expression-context # Condition inside ()
+    # For statement
+    - match: '(?i)\b(for)\b\s*(\()'
+      captures:
+        1: keyword.control.loop.for.p4
+        2: punctuation.section.loop.begin.bracket.round.p4
+      push:
+        - meta_scope: meta.loop.for.p4
+        - match: '\)'
+          scope: punctuation.section.loop.end.bracket.round.p4
+          set: statement-or-block # Expect the loop body
+        - match: ";"
+          scope: punctuation.terminator.semicolon.p4
+        - match: '(?i)\b(in)\b' # For-in loop variant
+          scope: keyword.control.loop.in.p4
+        - include: declarations # Allow declarations in init
+        - include: method-call-or-assignment # Allow assignments/calls
+        - include: type-ref # For type in for-in loop
+        - include: expression-context # For condition/update/collection
+    # Other control keywords
+    - match: '(?i)\b(return|exit|break|continue|transition)\b'
+      scope: keyword.control.flow.p4
+      push:
+        # Expect semicolon or expression then semicolon
+        - match: ";"
+          scope: punctuation.terminator.semicolon.p4
+          pop: true
+        - include: expression-context
+    - match: '(?i)\b(apply)\b' # Often used like control flow in control blocks
+      scope: keyword.control.apply.p4
+
+  statement-or-block:
+    # Helper to expect a single statement ending in ; or a full block {}
+    - match: "{"
+      scope: punctuation.section.block.begin.bracket.curly.p4
+      set: block # Enter a full block
+    - match: ";"
+      scope: punctuation.terminator.semicolon.p4
+      pop: true # End of simple statement
+    - include: statements # Match the contents of the statement
+    - include: main # General tokens
+
+  # ** Corrected Switch statement contexts **
+  switch-condition-context:
+    - meta_scope: meta.control.switch.condition.p4
+    - match: '\)' # Match the closing parenthesis
+      scope: punctuation.section.expression.end.bracket.round.p4
+      set: switch-expect-body-brace-context # After ')', expect '{'
+    - include: expression-context # Match the expression inside ()
+    - include: comments # Allow comments within the condition parens
+
+  switch-expect-body-brace-context:
+    - meta_scope: meta.control.switch.expect-brace.p4
+    - match: "{" # Match the opening brace of the body
+      scope: punctuation.section.block.begin.bracket.curly.p4
+      set: switch-body # Enter the actual switch body context
+    # Allow only whitespace or comments between ')' and '{'.
+    - include: comments
+
+  switch-body:
+    - meta_scope: meta.switch.body.p4
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+      pop: true
+    - match: '(?i)\b(default)\b\s*(:)'
+      captures:
+        1: keyword.control.case.default.p4
+        2: punctuation.separator.colon.p4
+      push: switch-case-content
+    - match: "(?=.*:)" # Lookahead for case label
+      push:
+        - match: ":"
+          scope: punctuation.separator.colon.p4
+          pop: true
+        - include: expression-context # Match the case label expression
+      set: switch-case-content
+    - include: comments
+
+  switch-case-content:
+    - meta_scope: meta.switch.case.p4
+    # Handles block or fallthrough
+    - match: "{"
+      scope: punctuation.section.block.begin.bracket.curly.p4
+      push: block # Case has a block
+    - match: '(?=.*\b(default|case)\b.*:|})' # Lookahead for next case or end brace (fallthrough)
+      pop: true
+    - include: statements # Statements within the case before block or fallthrough
+    - include: main
+
+  # Specific Declaration Bodies ==============================
+
+  control-declaration-body:
+    - meta_scope: meta.control.declaration.p4
+    - match: "{"
+      scope: punctuation.section.block.begin.bracket.curly.p4
+      push:
+        - meta_scope: meta.control.body.p4
+        - match: "}"
+          scope: punctuation.section.block.end.bracket.curly.p4
+          pop: true # Pop inner body context
+        - match: '(?i)\b(apply)\b\s*(\{)' # Apply block
+          captures:
+            1: keyword.control.apply.p4
+            2: punctuation.section.block.begin.bracket.curly.p4
+          push: block # Apply body is a block
+        # Local declarations inside control block
+        - include: declarations
+        - include: main
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+      pop: true # Pop outer control declaration context
+    - include: function-parameters # Constructor parameters
+
+  parser-declaration-body:
+    - meta_scope: meta.parser.declaration.p4
+    - match: "{"
+      scope: punctuation.section.block.begin.bracket.curly.p4
+      push:
+        - meta_scope: meta.parser.body.p4
+        - match: "}"
+          scope: punctuation.section.block.end.bracket.curly.p4
+          pop: true # Pop inner body context
+        - include: parser-states # Look for states first
+        # Local declarations inside parser block
+        - include: declarations
+        - include: main
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+      pop: true # Pop outer parser declaration context
+    - include: function-parameters # Constructor parameters
+
+  parser-states:
+    - match: '(?i)\b(state)\b\s+({{any_identifier}})'
+      captures:
+        1: keyword.control.state.p4
+        2: entity.name.function.state.p4
+      push:
+        - meta_scope: meta.parser.state.p4
+        - match: "{"
+          scope: punctuation.section.block.begin.bracket.curly.p4
+          push:
+            - meta_scope: meta.parser.state.body.p4
+            - match: "}"
+              scope: punctuation.section.block.end.bracket.curly.p4
+              pop: true # Pop state body
+            - include: transition-statement
+            - include: statements # Parser statements
+            - include: main
+        - match: "}"
+          scope: punctuation.section.block.end.bracket.curly.p4
+          pop: true # Pop state declaration
+        - include: annotations # State annotations
+
+  transition-statement:
+    - match: '(?i)\b(transition)\b'
+      scope: keyword.control.transition.p4
+      push:
+        - meta_scope: meta.transition.p4
+        - match: ";"
+          scope: punctuation.terminator.semicolon.p4
+          pop: true
+        - match: '(?i)\b(select)\b\s*(\()' # Select expression
+          captures:
+            1: keyword.control.select.p4
+            2: punctuation.section.arguments.begin.bracket.round.p4
+          set: select-expression
+        - match: "({{any_identifier}})" # Direct state name transition
+          scope: entity.name.function.state.p4
+        - include: main
+
+  select-expression:
+    - meta_scope: meta.select.expression.p4
+    - match: '\)'
+      scope: punctuation.section.arguments.end.bracket.round.p4
+      set:
+        - match: "{"
+          scope: punctuation.section.block.begin.bracket.curly.p4
+          set: select-case-list
+    - include: expression-list # Expression list inside select()
+
+  select-case-list:
+    - meta_scope: meta.select.cases.p4
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+      pop: true
+    # Keyset : Name ;
+    - match: "(?=.*:)" # Lookahead for colon separating keyset and target state
+      push:
+        - match: ":"
+          scope: punctuation.separator.colon.p4
+          pop: true
+        - include: keyset-expression
+      set: # After keyset and colon, expect target state name and semicolon
+        - match: ";"
+          scope: punctuation.terminator.semicolon.p4
+          pop: true
+        - match: "({{any_identifier}})"
+          scope: entity.name.function.state.p4 # Target state name
+        - include: main
+    - include: comments
+
+  keyset-expression:
+    - meta_scope: meta.keyset.expression.p4
+    - match: '(?i)\b(default|_)\b' # default or don't care
+      scope: constant.language.p4
+    - match: '&&&|(\.\.)' # Mask or range operators specific to keysets
+      scope: keyword.operator.keyset.p4
+    - include: expression-context # Keyset elements are expressions
+
+  table-declaration-body:
+    - meta_scope: meta.table.declaration.p4
+    - match: "{"
+      scope: punctuation.section.block.begin.bracket.curly.p4
+      push:
+        - meta_scope: meta.table.properties.p4
+        - match: "}"
+          scope: punctuation.section.block.end.bracket.curly.p4
+          pop: true # Pop table properties context
+        - include: table-properties
+        - include: main
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+      pop: true # Pop outer table declaration context
+
+  # ** Corrected table-properties context **
+  table-properties:
+    - match: '(?i)\b(key)\b\s*(=)\s*(\{)'
+      captures:
+        1: keyword.other.table.key.p4
+        2: keyword.operator.assignment.p4
+        3: punctuation.section.block.begin.bracket.curly.p4
+      push: table-key-list
+    - match: '(?i)\b(actions)\b\s*(=)\s*(\{)'
+      captures:
+        1: keyword.other.table.actions.p4
+        2: keyword.operator.assignment.p4
+        3: punctuation.section.block.begin.bracket.curly.p4
+      push: table-action-list
+    - match: '(?i)\b(const)\b\s+(?i)\b(entries)\b\s*(=)\s*(\{)'
+      captures:
+        1: storage.modifier.const.p4
+        2: keyword.other.table.entries.p4
+        3: keyword.operator.assignment.p4
+        4: punctuation.section.block.begin.bracket.curly.p4
+      push: table-entries-list
+    - match: '(?i)\b(entries)\b\s*(=)\s*(\{)'
+      captures:
+        1: keyword.other.table.entries.p4
+        2: keyword.operator.assignment.p4
+        3: punctuation.section.block.begin.bracket.curly.p4
+      push: table-entries-list
+    # Other properties (size, default_action, etc.)
+    - match: '(?i)\b(const)\b'
+      scope: storage.modifier.const.p4
+    - match: '({{table_property_keywords}})\b\s*(=)' # Known property keywords
+      captures:
+        1: keyword.other.table.property.p4
+        2: keyword.operator.assignment.p4
+      set: # Use set to expect expression then semicolon
+        - meta_scope: meta.table.property.assignment.p4
+        - match: ";" # Expect the terminating semicolon AFTER the expression
+          scope: punctuation.terminator.semicolon.p4
+          pop: true # Pop back to table-properties context
+        - include: expression-context # Include rules to match the expression first
+        - include: comments # Allow comments before the semicolon
+    - match: '({{any_identifier}})\b\s*(=)' # Fallback for custom properties
+      captures:
+        1: variable.other.property.p4
+        2: keyword.operator.assignment.p4
+      set: # Use set here as well
+        - meta_scope: meta.table.property.assignment.p4
+        - match: ";" # Expect the terminating semicolon AFTER the expression
+          scope: punctuation.terminator.semicolon.p4
+          pop: true # Pop back to table-properties context
+        - include: expression-context # Include rules to match the expression first
+        - include: comments # Allow comments before the semicolon
+    - include: annotations # Annotations on properties
+
+  table-key-list:
+    - meta_scope: meta.table.key.list.p4
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+      pop: true
+    - match: ":"
+      scope: punctuation.separator.colon.p4
+      push:
+        - match: ";"
+          scope: punctuation.terminator.semicolon.p4
+          pop: true
+        - match: "({{any_identifier}})" # Match kind name
+          scope: entity.name.type.matchkind.p4
+        - include: annotations # Annotations on key element
+        - include: main
+    - include: expression-context # Key expression
+    - include: comments
+
+  table-action-list:
+    - meta_scope: meta.table.action.list.p4
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+      pop: true
+    - match: ";"
+      scope: punctuation.terminator.semicolon.p4
+    - match: '({{any_identifier}})\s*(?=\()' # Action name followed by ( -> action ref with args
+      captures:
+        1: entity.name.function.actionref.p4
+      push: argument-list # Action arguments
+    - match: "({{any_identifier}})" # Action name without args
+      scope: entity.name.function.actionref.p4
+    - include: annotations # Annotations on action refs
+    - include: comments
+
+  table-entries-list:
+    - meta_scope: meta.table.entries.list.p4
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+      pop: true
+    # entry: [const] [priority:] keyset : action_ref [annotations] ;
+    - match: '(?i)\b(const)\b'
+      scope: storage.modifier.const.p4
+    - match: '(?i)\b(priority)\b\s*(=)\s*({{integer}}|\(.*\))\s*(:)' # Priority
+      captures:
+        1: keyword.other.table.priority.p4
+        2: keyword.operator.assignment.p4
+        3: constant.numeric.p4 # Priority value or expression
+        4: punctuation.separator.colon.p4
+    - match: "(?=.*:)" # Keyset part lookahead
+      push:
+        - match: ":"
+          scope: punctuation.separator.colon.p4
+          pop: true
+        - include: keyset-expression # The keyset
+    - match: '({{any_identifier}})\s*(?=\()' # Action ref with args
+      captures:
+        1: entity.name.function.actionref.p4
+      set: # After action ref, check for annotations then semicolon
+        - match: '\('
+          scope: punctuation.section.arguments.begin.bracket.round.p4
+          push: argument-list
+        - match: ";"
+          scope: punctuation.terminator.semicolon.p4
+          pop: true
+        - include: annotations
+    - match: "({{any_identifier}})" # Action ref without args
+      scope: entity.name.function.actionref.p4
+      set: # After action ref, check for annotations then semicolon
+        - match: ";"
+          scope: punctuation.terminator.semicolon.p4
+          pop: true
+        - include: annotations
+    - include: comments
+
+  extern-body:
+    - meta_scope: meta.extern.body.p4
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+      pop: true
+    # Method Prototypes
+    - match: '(?i)\b(abstract)\b'
+      scope: storage.modifier.abstract.p4
+    - match: '(?=\b(?:{{base_types}}|{{any_identifier}}|void)\b.*\()' # Lookahead for method prototype
+      push: function-declaration # Treat method prototypes like function declarations without body
+    - include: comments
+    - include: annotations
+
+  # Type System ============================================
+
+  type-declarations:
+    # Struct
+    - match: '(?i)\b(struct)\b\s+({{any_identifier}})'
+      captures:
+        1: storage.type.struct.p4
+        2: entity.name.type.struct.p4
+      push: struct-body
+    # Header
+    - match: '(?i)\b(header)\b\s+({{any_identifier}})'
+      captures:
+        1: storage.type.header.p4
+        2: entity.name.type.header.p4
+      push: struct-body # Headers have same body structure as structs
+    # Header Union
+    - match: '(?i)\b(header_union)\b\s+({{any_identifier}})'
+      captures:
+        1: storage.type.headerunion.p4
+        2: entity.name.type.headerunion.p4
+      push: struct-body # Header unions also have same body structure
+    # Enum
+    - match: '(?i)\b(enum)\b\s+(?:({{base_types}})\s+)?({{any_identifier}})' # Optional base type for enum
+      captures:
+        1: storage.type.enum.p4
+        2: support.type.p4 # Enum base type
+        3: entity.name.type.enum.p4
+      push: enum-body
+    # Typedef / Type alias
+    - match: '(?i)\b(typedef|type)\b'
+      scope: storage.type.typedef.p4
+      push: typedef-declaration
+    # Error declaration
+    - match: '(?i)\b(error)\b\s*(\{)'
+      captures:
+        1: storage.type.error.p4
+        2: punctuation.section.block.begin.bracket.curly.p4
+      push: identifier-list-body
+    # Match Kind declaration
+    - match: '(?i)\b(match_kind)\b\s*(\{)'
+      captures:
+        1: storage.type.matchkind.p4
+        2: punctuation.section.block.begin.bracket.curly.p4
+      push: identifier-list-body
+    # Package type declaration
+    - match: '(?i)\b(package)\b\s+({{any_identifier}})'
+      captures:
+        1: storage.type.package.p4
+        2: entity.name.type.package.p4
+      push: function-parameters # Package parameters
+
+  struct-body:
+    - meta_scope: meta.struct.body.p4
+    - match: "{"
+      scope: punctuation.section.block.begin.bracket.curly.p4
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+      pop: true
+    # Struct field: optAnnotations typeRef name ;
+    - match: '({{any_identifier}})\s*(;)' # Field name before semicolon
+      captures:
+        1: variable.other.member.p4 # Struct field name
+        2: punctuation.terminator.semicolon.p4
+    - include: type-ref
+    - include: annotations
+    - include: comments
+
+  enum-body:
+    - meta_scope: meta.enum.body.p4
+    - match: "{"
+      scope: punctuation.section.block.begin.bracket.curly.p4
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+      pop: true
+    # Enum member: name [ = initializer ]
+    - match: "({{any_identifier}})" # Enum member name
+      scope: constant.other.enum-member.p4
+    - match: "="
+      scope: keyword.operator.assignment.p4
+      push: expression-context # Specified value for enum member
+    - match: ","
+      scope: punctuation.separator.comma.p4
+    - include: annotations
+    - include: comments
+
+  identifier-list-body:
+    - meta_scope: meta.identifier-list.p4
+    - match: "{"
+      scope: punctuation.section.block.begin.bracket.curly.p4
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+      pop: true
+    - match: "({{any_identifier}})" # Identifier in the list (error member, match kind)
+      scope: constant.other.p4 # Treat as constants
+    - match: ","
+      scope: punctuation.separator.comma.p4
+    - include: comments
+
+  typedef-declaration:
+    - meta_scope: meta.typedef.p4
+    - match: ";"
+      scope: punctuation.terminator.semicolon.p4
+      pop: true
+    # typedef baseType name; or typedef derivedDecl name;
+    # derivedDecl (struct/header/etc.) is handled by type-declarations inclusion
+    - match: '({{any_identifier}})(?=\s*;)' # The new type name being defined
+      scope: entity.name.type.p4
+    - include: type-declarations # Allows typedef struct {...} name;
+    - include: type-ref # The original type being aliased
+    - include: annotations
+    - include: main
+
+  type-ref:
+    - meta_scope: meta.type.reference.p4
+    # Base types with potential width
+    - match: '(?i)\b(bit|int|varbit)\b\s*(<)'
+      captures:
+        1: support.type.p4
+        2: punctuation.section.typeargs.begin.bracket.angle.p4
+      push: type-width-specifier # Match width inside <>
+    # Other base types (using variable)
+    - match: '(?i)\b({{base_types}})\b'
+      scope: support.type.p4
+    # Tuple type
+    - match: '(?i)\b(tuple)\b\s*(<)'
+      captures:
+        1: support.type.tuple.p4
+        2: punctuation.section.typeargs.begin.bracket.angle.p4
+      push: type-argument-list # List of types inside <>
+    # P4 List type
+    - match: '(?i)\b(list)\b\s*(<)'
+      captures:
+        1: support.type.list.p4
+        2: punctuation.section.typeargs.begin.bracket.angle.p4
+      push: type-argument-list # Single type argument inside <>
+    # Named type (could be user defined or specialized)
+    - match: '({{any_identifier}})\s*(<)' # Type<...> specialization
+      captures:
+        1: entity.name.type.p4
+        2: punctuation.section.typeargs.begin.bracket.angle.p4
+      push: type-argument-list
+    - match: '({{any_identifier}})\s*(\[)' # Header stack Type[...]
+      captures:
+        1: entity.name.type.p4
+        2: punctuation.section.array.begin.bracket.square.p4
+      push:
+        - meta_scope: meta.header-stack.size.p4
+        - match: "]"
+          scope: punctuation.section.array.end.bracket.square.p4
+          pop: true
+        - include: expression-context # Size expression
+    - match: "({{any_identifier}})" # Simple named type
+      scope: entity.name.type.p4
+    # Type Variable (looks like an identifier in type context) - often handled by above rule
+    # Void type handled by base_types variable
+    # Don't care type arg
+    - match: "_"
+      scope: constant.language.p4
+
+  type-width-specifier:
+    - meta_scope: meta.type.width.p4
+    - match: ">"
+      scope: punctuation.section.typeargs.end.bracket.angle.p4
+      pop: true
+    - match: '\(' # Width specified by expression
+      scope: punctuation.section.expression.begin.bracket.round.p4
+      push:
+        - meta_scope: meta.expression.p4
+        - match: '\)'
+          scope: punctuation.section.expression.end.bracket.round.p4
+          pop: true
+        - include: expression-context
+    - include: numbers # Integer width
+    - include: comments
+
+  type-argument-list:
+    - meta_scope: meta.type.arguments.p4
+    - match: ">"
+      scope: punctuation.section.typeargs.end.bracket.angle.p4
+      pop: true
+    - match: ","
+      scope: punctuation.separator.comma.p4
+    - include: type-ref # Type arguments are types
+    - include: comments
+
+  # Functions, Parameters, Arguments ======================
+
+  function-declaration:
+    - meta_scope: meta.function.declaration.p4
+    # Return type first
+    - match: '(?i)\b(void)\b'
+      scope: storage.type.void.p4
+    - include: type-ref # Match return type
+    # Function name
+    - match: "({{any_identifier}})"
+      scope: entity.name.function.p4
+    # Optional type parameters <T, U>
+    - match: "<"
+      scope: punctuation.section.typeargs.begin.bracket.angle.p4
+      push: type-parameter-list # <...> for function type parameters
+    # Parameters (...)
+    - match: '\('
+      scope: punctuation.section.parameters.begin.bracket.round.p4
+      push: function-parameters
+    # Body (if not just a prototype)
+    - match: "{"
+      scope: punctuation.section.block.begin.bracket.curly.p4
+      set: block # Enter function body block
+    - match: ";" # End of prototype
+      scope: punctuation.terminator.semicolon.p4
+      pop: true
+    - include: annotations
+
+  function-parameters:
+    - meta_scope: meta.function.parameters.p4
+    - match: '\)'
+      scope: punctuation.section.parameters.end.bracket.round.p4
+      pop: true
+    # Parameter: [direction] type name [= expression]
+    - match: '(?i)\b(in|out|inout)\b'
+      scope: storage.modifier.direction.p4
+    - match: "({{any_identifier}})" # Parameter name
+      scope: variable.parameter.p4
+    - match: "=" # Default value
+      scope: keyword.operator.assignment.p4
+      push: expression-context
+    - match: ","
+      scope: punctuation.separator.comma.p4
+    - include: type-ref # Parameter type
+    - include: annotations # Annotations on parameters
+    - include: comments
+
+  argument-list:
+    - meta_scope: meta.function.arguments.p4
+    - match: '\)'
+      scope: punctuation.section.arguments.end.bracket.round.p4
+      pop: true
+    # Argument: [name =] (expression | _)
+    - match: '({{any_identifier}})\s*(=)' # Named argument
+      captures:
+        1: variable.parameter.named.p4 # Argument name
+        2: keyword.operator.assignment.p4
+    - match: "_" # Don't care argument
+      scope: constant.language.p4
+    - match: ","
+      scope: punctuation.separator.comma.p4
+    - include: expression-context # Positional argument value
+    - include: comments
+
+  type-parameter-list:
+    - meta_scope: meta.type.parameters.p4
+    - match: ">"
+      scope: punctuation.section.typeargs.end.bracket.angle.p4
+      pop: true
+    - match: "({{any_identifier}})" # Type parameter name
+      scope: entity.name.type.variable.p4
+    - match: ","
+      scope: punctuation.separator.comma.p4
+    - include: comments
+
+  # Basic Tokens ==========================================
+
+  keywords:
+    # Storage keywords (types and modifiers)
+    - match: '(?i)\b(const|extern|typedef|type|struct|header|header_union|enum|error|match_kind|parser|control|action|table|package|valueset)\b'
+      scope: storage.type.p4
+    - match: '(?i)\b(in|out|inout|abstract)\b'
+      scope: storage.modifier.p4
+    # Control flow keywords (handled in control-flow context primarily, but included here for safety)
+    - match: '(?i)\b(if|else|switch|for|in|return|exit|break|continue|transition|select|apply)\b'
+      scope: keyword.control.p4
+    # Table specific keywords
+    - match: '(?i)\b(key|actions|entries|priority|size|default_action)\b' # Added common implicit ones
+      scope: keyword.other.table.p4
+    # Parser specific keywords
+    - match: '(?i)\b(state)\b'
+      scope: keyword.control.state.p4
+    # Other keywords
+    - match: '(?i)\b(pragma)\b'
+      scope: keyword.control.directive.pragma.p4
+
+  constants:
+    - match: '(?i)\b(true|false)\b'
+      scope: constant.language.boolean.p4
+    - match: '\b_\b' # Standalone underscore (don't care)
+      scope: constant.language.p4
+    - match: '(?i)\b(this)\b'
+      scope: variable.language.this.p4
+    # Error constants like error.NoError often look like Type.Member
+    - match: '\b(error)\.({{identifier}})'
+      captures:
+        1: support.type.error.p4
+        2: constant.other.errorcode.p4
+
+  operators:
+    # Assignment operators
+    - match: '==|!=|<=|>=|&&|\|\||\+\+|&&&|\.\.' # Multi-char ops first
+      scope: keyword.operator.comparison.p4
+    - match: '<<|>>|\| \+ \| | \| \- \| ' # Multi-char ops first
+      scope: keyword.operator.bitwise.p4
+    - match: "{{lvalue_operators}}" # Assignment ops using variable
+      scope: keyword.operator.assignment.p4
+    # Arithmetic, logical, bitwise, ternary, cast
+    - match: '[+\-*/%&|^!~?:]'
+      scope: keyword.operator.arithmetic.p4 # Broad category, ok for highlighting
+    - match: "[<>]" # Comparison or type args - context helps disambiguate
+      scope: keyword.operator.comparison.p4
+    - match: "=" # Simple assignment (needs to be after other assignments)
+      scope: keyword.operator.assignment.p4
+    - match: '\.' # Member access
+      scope: punctuation.accessor.dot.p4
+
+  punctuation:
+    - match: ";"
+      scope: punctuation.terminator.semicolon.p4
+    - match: ","
+      scope: punctuation.separator.comma.p4
+    - match: ":" # Colon used in various places (switch, ternary, keyset)
+      scope: punctuation.separator.colon.p4
+    - match: "{"
+      scope: punctuation.section.block.begin.bracket.curly.p4
+    - match: "}"
+      scope: punctuation.section.block.end.bracket.curly.p4
+    - match: '\('
+      scope: punctuation.section.parens.begin.bracket.round.p4
+    - match: '\)'
+      scope: punctuation.section.parens.end.bracket.round.p4
+    - match: '\['
+      scope: punctuation.section.array.begin.bracket.square.p4
+    - match: "]"
+      scope: punctuation.section.array.end.bracket.square.p4
+    # Angle brackets handled contextually (type args, comparison operators)
+
+  identifiers:
+    # Distinguish Type identifiers (starting with uppercase) by convention
+    - match: '\b({{type_identifier}})\b'
+      scope: entity.name.type.p4 # Assume it's a type if uppercase start
+    # Standard identifiers (variables, functions, etc.)
+    - match: '\b({{identifier}})\b'
+      scope: variable.other.p4 # Default scope
+
+  numbers:
+    # Hexadecimal (starts with 0x)
+    - match: '\b0[xX][0-9a-fA-F]+[sw]?\b'
+      scope: constant.numeric.hex.p4
+    # Binary (starts with 0b)
+    - match: '\b0[bB][01]+[sw]?\b'
+      scope: constant.numeric.binary.p4
+    # Octal (starts with 0o)
+    - match: '\b0[oO][0-7]+[sw]?\b'
+      scope: constant.numeric.octal.p4
+    # Decimal with optional width/sign marker (e.g., 10w, 4s)
+    # This should come AFTER hex/binary/octal to ensure '0' alone is decimal 0.
+    - match: '\b{{integer}}\b' # Variable integer is '[0-9]+[sw]?'
+      scope: constant.numeric.integer.decimal.p4 # Made scope more specific
+
+  strings:
+    - match: '"'
+      scope: punctuation.definition.string.begin.p4
+      push: double-quoted-string
+
+  double-quoted-string:
+    - meta_scope: string.quoted.double.p4
+    - match: '\\.' # Escapes
+      scope: constant.character.escape.p4
+    - match: '"'
+      scope: punctuation.definition.string.end.p4
+      pop: true
+    - match: '[^\\"]+' # String content
+      scope: string.quoted.double.p4
+
+  annotations:
+    - match: '@({{any_identifier}})\s*(\()?' # Match @name or @name( - capture name
+      captures:
+        1: entity.name.annotation.p4
+        2: punctuation.section.parens.begin.bracket.round.p4
+      scope: storage.modifier.annotation.p4
+      push: annotation-body
+    - match: '@({{any_identifier}})\s*(\[)?' # Match @name or @name[ - capture name
+      captures:
+        1: entity.name.annotation.p4
+        2: punctuation.section.array.begin.bracket.square.p4
+      scope: storage.modifier.annotation.p4
+      push: annotation-body
+
+  # Context pushed during string embedding.
+  # Its main job is to pop the stack when control returns after embedding.
+  annotation-string-content:
+    # When control returns here, the next character should be the one
+    # that triggered the 'escape' (the closing quote).
+    # This rule matches it and pops the stack.
+    - match: '"'
+        # Scope was already applied by escape_captures, just pop.
+      pop: true
+    # Fallback: If something unexpected happens (e.g., embed fails silently),
+    # maybe pop on end of line to prevent getting stuck indefinitely.
+    - match: '(?=\n)' # Lookahead for newline
+      pop: true
+
+  annotation-body:
+     - meta_scope: meta.annotation.body.p4
+     - match: '\)'
+       scope: punctuation.section.parens.end.bracket.round.p4
+       pop: true
+     - match: ']'
+       scope: punctuation.section.array.end.bracket.square.p4
+       pop: true
+
+     - match: '"' # Match the opening quote
+       scope: punctuation.definition.string.begin.p4
+       # When " is matched:
+       # 1. Push a context onto the stack ('annotation-string-content').
+       # 2. Immediately start embedding 'source.p4'.
+       # 3. Stop embedding when 'escape' pattern (") is found.
+       # 4. Scope the 'escape' match using 'escape_captures'.
+       # 5. Apply 'meta_embed_scope' to the embedded region.
+       push: annotation-string-content
+       embed: scope:source.p4
+       escape: '"'
+       escape_captures:
+         0: punctuation.definition.string.end.p4 # Scope the closing quote
+       meta_embed_scope: source.p4.embedded.expression
+
+     # Includes for non-string content within the annotation body
+     - include: keywords
+     - include: numbers
+     - include: constants
+     - include: operators
+     - include: punctuation # Punctuation outside strings
+     - match: '({{any_identifier}})'
+       scope: variable.other.annotation.p4 # Identifiers outside strings
+     - include: comments # Comments outside strings
+
+
+  # Preprocessor Directives (Common C-style) ==============
+  preprocessor:
+    - match: '^#(include)\b'
+      scope: keyword.control.import.include.c
+      push: include-directive
+    - match: '^#(define)\b'
+      scope: keyword.control.directive.define.c
+      push: define-directive
+    - match: '^#(pragma)\b' # P4 pragma
+      scope: keyword.control.directive.pragma.p4
+      push: pragma-directive
+    - match: '^#(ifdef|ifndef|if|elif|else|endif)\b'
+      scope: keyword.control.directive.conditional.c
+      push: preprocessor-line
+
+  include-directive:
+    - meta_scope: meta.preprocessor.include.c
+    - match: '\n'
+      pop: true
+    - include: comments
+    - match: <[^>]*>
+      scope: string.quoted.other.lt-gt.include.c
+    - match: \"[^\"]*\"
+      scope: string.quoted.double.include.c
+
+  define-directive:
+    - meta_scope: meta.preprocessor.define.c
+    - match: '\n'
+      pop: true
+    - match: '\\\n' # Line continuation
+      scope: punctuation.separator.continuation.c
+    - match: '({{identifier}})\b'
+      scope: entity.name.constant.macro.c
+    - match: '\(' # Macro parameters
+      scope: punctuation.definition.parameters.begin.c
+      push:
+        - meta_scope: meta.macro.parameters.c
+        - match: '\)'
+          scope: punctuation.definition.parameters.end.c
+          pop: true
+        - match: "{{identifier}}"
+          scope: variable.parameter.macro.c
+        - match: ","
+          scope: punctuation.separator.parameters.c
+        - include: comments
+    - include: comments
+
+  pragma-directive:
+    - meta_scope: meta.preprocessor.pragma.p4
+    - match: '\n'
+      pop: true
+    # Pragmas often have specific keywords
+    - match: '(?i)\b(.*\b)' # Capture pragma content broadly
+      scope: meta.preprocessor.pragma.p4 # No specific scope, just mark it
+    - include: comments
+
+  preprocessor-line:
+    - meta_scope: meta.preprocessor.conditional.c
+    - match: '\n'
+      pop: true
+    - include: comments
+    # Minimal highlighting within directive lines
+    - include: numbers
+    - include: strings
+    - include: operators
+    - match: "({{identifier}})"
+      scope: variable.other.preprocessor.c
+
+  # Comments =============================================
+  comments:
+    # Line comments
+    - match: "//.*$"
+      scope: comment.line.double-slash.p4
+      push:
+        - meta_scope: comment.line.double-slash.p4
+        - match: $
+          pop: true
+    # Block comments
+    - match: '/\*'
+      scope: punctuation.definition.comment.begin.p4
+      push: block-comment
+
+  block-comment:
+    - meta_scope: comment.block.c.p4
+    - match: '\*/'
+      scope: punctuation.definition.comment.end.p4
+      pop: true
+    - match: "[^*/]+" # Any characters that are not stars or slashes
+      scope: comment.block.c.p4
+    - match: "[*/]" # A star or a slash that is not part of the end marker
+      scope: comment.block.c.p4
